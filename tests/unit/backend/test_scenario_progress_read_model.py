@@ -715,6 +715,7 @@ class TestScenarioResultRoles:
         )
 
         assert {result.result_role for result in legacy.results} == {AttackResultRole.UNKNOWN}
+
         def _strip(obj):
             if isinstance(obj, dict):
                 obj.pop("producer_counts", None)
@@ -724,7 +725,7 @@ class TestScenarioResultRoles:
                 for item in obj:
                     _strip(item)
             return obj
-            
+
         legacy_dump = _strip(legacy.summary.model_dump())
         snapshot_dump = _strip(snapshot.summary.model_dump())
         assert legacy_dump == snapshot_dump

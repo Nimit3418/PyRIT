@@ -340,8 +340,18 @@ class ScenarioProgressReadModel:
             )
             attempts_by_unit.setdefault(identity, []).append(result)
 
-        def aggregate(*, units: Sequence[ResultUnitIdentity], planned: int | None) -> ScenarioProgressCounts:
-            return count_execution_units(units=units, attempts_by_unit=attempts_by_unit, planned=planned)
+        def aggregate(
+            *,
+            units: Sequence[ResultUnitIdentity],
+            planned: int | None,
+            producer_attempts: Sequence[ScenarioProgressResult] | None = None,
+        ) -> ScenarioProgressCounts:
+            return count_execution_units(
+                units=units,
+                attempts_by_unit=attempts_by_unit,
+                planned=planned,
+                producer_attempts=producer_attempts,
+            )
 
         group_units: dict[str, list[ResultUnitIdentity]] = {
             group.id: [
@@ -356,6 +366,7 @@ class ScenarioProgressReadModel:
         overall = aggregate(
             units=overall_units,
             planned=len(overall_units) if plan_complete else None,
+            producer_attempts=results,
         )
         planned_units = set(overall_units)
         unattributed_attempts = sum(

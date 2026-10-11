@@ -1621,6 +1621,15 @@ class ScenarioRunService:
                 successful_units=overall.succeeded,
                 error_attempts=overall.errors,
                 total_retries=overall.retries,
+                target_facing_attempts=overall.producer_counts.target_facing.attempts,
+                target_facing_error_attempts=overall.producer_counts.target_facing.errors,
+                target_facing_retries=overall.producer_counts.target_facing.retries,
+                orchestration_attempts=overall.producer_counts.orchestration.attempts,
+                orchestration_error_attempts=overall.producer_counts.orchestration.errors,
+                orchestration_retries=overall.producer_counts.orchestration.retries,
+                unknown_role_attempts=overall.producer_counts.unknown.attempts,
+                unknown_role_error_attempts=overall.producer_counts.unknown.errors,
+                unknown_role_retries=overall.producer_counts.unknown.retries,
             )
         return recounted
 

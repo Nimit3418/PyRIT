@@ -12,7 +12,6 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from pyrit.models.analytics import OutcomeStatistics
 from pyrit.models.catalog.scenario import (
     ScenarioOverloadSummary,
-    ScenarioProducerCategoryCounts,
     ScenarioProducerCounts,
     ScenarioTargetSummary,
 )  # noqa: TC001

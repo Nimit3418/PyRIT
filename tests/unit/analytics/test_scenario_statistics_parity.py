@@ -30,6 +30,7 @@ from pyrit.models import (
     AttackSeedGroup,
     ComponentIdentifier,
     OutcomeStatistics,
+    ScenarioProducerCounts,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
     ScenarioRunPlanSeedGroup,
@@ -56,7 +57,7 @@ class _Attempt:
     attributed_seed_context: str | None = None
     attack_result_id: str | None = None
     seconds: int | None = None
-    result_role: AttackResultRole = AttackResultRole.UNKNOWN
+    result_role: AttackResultRole | str = AttackResultRole.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -250,10 +251,16 @@ _HISTORIES = {
     "role_aware_accounting": _History(
         plan=_plan(_group(name="attack", eval_hash="eval", seed_ids=["a"]), seeds=[_seed("a", "A")]),
         attempts=[
-            _Attempt("attack", "A", AttackOutcome.SUCCESS, seed_group_id="a", result_role=AttackResultRole.TARGET_FACING),
-            _Attempt("attack", "A", AttackOutcome.SUCCESS, seed_group_id="a", result_role=AttackResultRole.TARGET_FACING),
+            _Attempt(
+                "attack", "A", AttackOutcome.SUCCESS, seed_group_id="a", result_role=AttackResultRole.TARGET_FACING
+            ),
+            _Attempt(
+                "attack", "A", AttackOutcome.SUCCESS, seed_group_id="a", result_role=AttackResultRole.TARGET_FACING
+            ),
             _Attempt("attack", "A", AttackOutcome.ERROR, seed_group_id="a", result_role=AttackResultRole.TARGET_FACING),
-            _Attempt("attack", "A", AttackOutcome.SUCCESS, seed_group_id="a", result_role=AttackResultRole.ORCHESTRATION),
+            _Attempt(
+                "attack", "A", AttackOutcome.SUCCESS, seed_group_id="a", result_role=AttackResultRole.ORCHESTRATION
+            ),
         ],
     ),
 }
@@ -310,7 +317,11 @@ async def _persist(memory: MemoryInterface, history: _History) -> str:
             seed_group = _seed_group(attempt.objective, attempt.attributed_seed_context)
             attribution_data["seed_group_id"] = seed_group.logical_id
         if attempt.result_role != AttackResultRole.UNKNOWN:
-            attribution_data["result_role"] = attempt.result_role.value
+            attribution_data["result_role"] = (
+                attempt.result_role.value
+                if isinstance(attempt.result_role, AttackResultRole)
+                else str(attempt.result_role)
+            )
         atomic_attack_identifier = None
         if attempt.seed_context is not None:
             atomic_attack_identifier = AtomicAttackIdentifier.build(
@@ -371,6 +382,9 @@ async def test_sdk_api_and_reports_report_identical_statistics(history_name: str
     report = json.loads(await JsonScenarioResultPrinter().render_async(scenario_result))
     assert report["stats"]["overall_success_rate"] == (expected or 0)
     assert report["stats"]["outcomes"] == TypeAdapter(OutcomeStatistics).dump_python(sdk.overall.outcomes, mode="json")
+    assert report["stats"]["producer_counts"] == TypeAdapter(ScenarioProducerCounts).dump_python(
+        sdk.overall.producer_counts, mode="json"
+    )
 
     # Per-group numbers agree between the SDK, the saved-plan progress view, and the reports. Compare
     # key sets first so a group missing from one view fails instead of reading as 0%.
@@ -389,6 +403,9 @@ async def test_sdk_api_and_reports_report_identical_statistics(history_name: str
     for group in report["groups"]:
         assert group["outcomes"] == TypeAdapter(OutcomeStatistics).dump_python(
             sdk.display_groups[group["name"]].outcomes, mode="json"
+        )
+        assert group["producer_counts"] == TypeAdapter(ScenarioProducerCounts).dump_python(
+            sdk.display_groups[group["name"]].producer_counts, mode="json"
         )
     if history.plan is not None:
         progress_groups = {
@@ -462,3 +479,186 @@ async def test_history_aggregate_flags_runs_with_identifier_only_attempts(sqlite
 
     assert aggregates[flagged].needs_sdk_statistics
     assert not aggregates[attributed].needs_sdk_statistics
+
+
+async def test_unmatched_attempts_visible_in_producer_accounting(sqlite_instance) -> None:
+    # 4 rows: 1 planned target-facing success, 1 unmatched target-facing error,
+    # 1 unmatched orchestration row, and 1 unmatched malformed-role row.
+    plan = _plan(
+        _group(name="attack", eval_hash="eval", seed_ids=["seed_1"]),
+        seeds=[_seed("seed_1", "Objective 1")],
+    )
+    history = _History(
+        plan=plan,
+        attempts=[
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Objective 1",
+                outcome=AttackOutcome.SUCCESS,
+                seed_group_id="seed_1",
+                result_role=AttackResultRole.TARGET_FACING,
+            ),
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Unmatched Objective 2",
+                outcome=AttackOutcome.ERROR,
+                seed_group_id="unmatched_seed",
+                result_role=AttackResultRole.TARGET_FACING,
+            ),
+            _Attempt(
+                atomic_attack_name="orchestrator",
+                objective="Unmatched Objective 3",
+                outcome=AttackOutcome.SUCCESS,
+                result_role=AttackResultRole.ORCHESTRATION,
+            ),
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Unmatched Objective 4",
+                outcome=AttackOutcome.ERROR,
+                # Malformed role that falls back to UNKNOWN
+                result_role="target_facing ",
+            ),
+        ],
+    )
+    scenario_result_id = await _persist(sqlite_instance, history)
+
+    # SDK
+    [scenario_result] = await sqlite_instance.get_scenario_results_async(scenario_result_ids=[scenario_result_id])
+    sdk = compute_scenario_statistics(scenario_result)
+
+    assert sdk.attempts == 4
+    assert sdk.unattributed_attempts == 3
+    assert sdk.overall.completed == 1
+    assert sdk.overall.planned == 1
+    assert sdk.overall.succeeded == 1
+
+    # Overall producer accounting includes all 4 rows
+    assert sdk.overall.producer_counts.target_facing.attempts == 2
+    assert sdk.overall.producer_counts.target_facing.errors == 1
+    assert sdk.overall.producer_counts.orchestration.attempts == 1
+    assert sdk.overall.producer_counts.orchestration.errors == 0
+    assert sdk.overall.producer_counts.unknown.attempts == 1
+    assert sdk.overall.producer_counts.unknown.errors == 1
+
+    # API / Service
+    service = ScenarioRunService()
+    runs = await service.list_runs_async()
+    [list_item] = [item for item in runs.items if item.scenario_result_id == scenario_result_id]
+    progress = await service.get_run_progress_from_storage_async(
+        scenario_result_id=scenario_result_id, since=None, limit=500, active_group_ids=[]
+    )
+
+    # Progress & History reconcile with SDK
+    assert progress.summary.unattributed_attempts == 3
+    assert progress.summary.overall.completed == 1
+    assert progress.summary.overall.planned == 1
+    assert progress.summary.overall.producer_counts == sdk.overall.producer_counts
+    assert list_item.producer_counts == sdk.overall.producer_counts
+    assert list_item.completed_attacks == 1
+
+
+async def test_malformed_roles_fall_back_to_unknown_in_producer_accounting(sqlite_instance) -> None:
+    # Verify that malformed role values (trailing spaces or uppercase) fall back to UNKNOWN
+    # in both SDK statistics and backend SQL aggregation.
+    plan = _plan(
+        _group(name="attack", eval_hash="eval", seed_ids=["seed_1"]),
+        seeds=[_seed("seed_1", "Objective 1")],
+    )
+    history = _History(
+        plan=plan,
+        attempts=[
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Objective 1",
+                outcome=AttackOutcome.SUCCESS,
+                seed_group_id="seed_1",
+                result_role="target_facing ",  # trailing space
+            ),
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Objective 1",
+                outcome=AttackOutcome.SUCCESS,
+                seed_group_id="seed_1",
+                result_role="TARGET_FACING",  # uppercase
+            ),
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Objective 1",
+                outcome=AttackOutcome.SUCCESS,
+                seed_group_id="seed_1",
+                result_role=AttackResultRole.TARGET_FACING,  # exact canonical match
+            ),
+        ],
+    )
+    scenario_result_id = await _persist(sqlite_instance, history)
+
+    [scenario_result] = await sqlite_instance.get_scenario_results_async(scenario_result_ids=[scenario_result_id])
+    sdk = compute_scenario_statistics(scenario_result)
+
+    assert sdk.overall.producer_counts.target_facing.attempts == 1
+    assert sdk.overall.producer_counts.unknown.attempts == 2
+
+    # Verify backend SQL aggregation also treats both as unknown
+    aggregates = await sqlite_instance.get_scenario_history_aggregates_async(scenario_result_ids=[scenario_result_id])
+    agg = aggregates[scenario_result_id]
+    assert agg.target_facing_attempts == 1
+    assert agg.unknown_role_attempts == 2
+
+
+async def test_ambiguous_objective_with_identifier_recount_updates_producer_fields(sqlite_instance) -> None:
+    # Two planned seed groups share an objective.
+    # One target-facing attempt carries only its atomic identifier's seeds.
+    # SQL flags needs_sdk_statistics=True because objective matching in SQL is ambiguous.
+    # The fallback recount restores the unit and MUST copy producer fields.
+    planned_seed_a = _seed_group("Shared Objective", "context_a")
+    planned_seed_b = _seed_group("Shared Objective", "context_b")
+    history = _History(
+        plan=_plan(
+            _group(name="attack", eval_hash="eval", seed_ids=[planned_seed_a.logical_id, planned_seed_b.logical_id]),
+            seeds=[
+                ScenarioRunPlanSeedGroup(
+                    id=planned_seed_a.logical_id,
+                    objective="Shared Objective",
+                    objective_sha256=to_sha256("Shared Objective"),
+                ),
+                ScenarioRunPlanSeedGroup(
+                    id=planned_seed_b.logical_id,
+                    objective="Shared Objective",
+                    objective_sha256=to_sha256("Shared Objective"),
+                ),
+            ],
+        ),
+        attempts=[
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Shared Objective",
+                outcome=AttackOutcome.SUCCESS,
+                seed_context="context_a",
+                result_role=AttackResultRole.TARGET_FACING,
+            )
+        ],
+    )
+    scenario_result_id = await _persist(sqlite_instance, history)
+
+    # Check SQL aggregate directly: needs_sdk_statistics is True
+    aggregates = await sqlite_instance.get_scenario_history_aggregates_async(scenario_result_ids=[scenario_result_id])
+    assert aggregates[scenario_result_id].needs_sdk_statistics
+
+    # SDK
+    [scenario_result] = await sqlite_instance.get_scenario_results_async(scenario_result_ids=[scenario_result_id])
+    sdk = compute_scenario_statistics(scenario_result)
+    assert sdk.overall.completed == 1
+    assert sdk.overall.producer_counts.target_facing.attempts == 1
+
+    # API: list_runs_async recounts flagged runs
+    service = ScenarioRunService()
+    runs = await service.list_runs_async()
+    [list_item] = [item for item in runs.items if item.scenario_result_id == scenario_result_id]
+    progress = await service.get_run_progress_from_storage_async(
+        scenario_result_id=scenario_result_id, since=None, limit=500, active_group_ids=[]
+    )
+
+    assert list_item.completed_attacks == 1
+    assert list_item.producer_counts.target_facing.attempts == 1
+    assert list_item.producer_counts == sdk.overall.producer_counts
+    assert progress.summary.overall.producer_counts == sdk.overall.producer_counts
