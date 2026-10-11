@@ -492,6 +492,38 @@ def compute_scenario_statistics(
         len(unit_attempts) for unit, unit_attempts in attempts_by_unit.items() if unit not in counted
     )
 
+    producer_attempts_by_name: dict[str, list[ScenarioAttempt]] = {}
+    producer_attempts_by_display_group: dict[str, list[ScenarioAttempt]] = {}
+
+    if plan is not None:
+        planned_groups_by_id = {group.id: group for group in plan.atomic_groups}
+        for attempt in attempts:
+            planned_group = planned_groups_by_id.get(attempt.unit.atomic_group_id)
+            if planned_group is not None:
+                producer_attempts_by_name.setdefault(planned_group.atomic_attack_name, []).append(attempt)
+                producer_attempts_by_display_group.setdefault(planned_group.display_group, []).append(attempt)
+            else:
+                matching_planned = plan_lookup.groups_by_name.get(attempt.atomic_attack_name, ())
+                if len(matching_planned) == 0:
+                    name = attempt.atomic_attack_name
+                    display_group = scenario_result.display_group_map.get(name, name)
+                    producer_attempts_by_name.setdefault(name, []).append(attempt)
+                    producer_attempts_by_display_group.setdefault(display_group, []).append(attempt)
+                # If len(matching_planned) > 1: genuinely ambiguous attribution between planned groups.
+                # Keep genuinely ambiguous attribution explicitly unmatched rather than guessing.
+    else:
+        for attempt in attempts:
+            name = attempt.atomic_attack_name
+            display_group = scenario_result.display_group_map.get(name, name)
+            producer_attempts_by_name.setdefault(name, []).append(attempt)
+            producer_attempts_by_display_group.setdefault(display_group, []).append(attempt)
+
+    attack_names = list(units_by_name.keys())
+    attack_names.extend(name for name in producer_attempts_by_name if name not in units_by_name)
+
+    display_group_names = list(units_by_display_group.keys())
+    display_group_names.extend(dg for dg in producer_attempts_by_display_group if dg not in units_by_display_group)
+
     def _count(
         units: Sequence[ScenarioExecutionUnit],
         *,
@@ -506,8 +538,20 @@ def compute_scenario_statistics(
 
     return ScenarioExecutionStatistics(
         overall=_count(counted_units, producer_attempts=attempts),
-        atomic_attacks={name: _count(units) for name, units in units_by_name.items()},
-        display_groups={name: _count(units) for name, units in units_by_display_group.items()},
+        atomic_attacks={
+            name: _count(
+                units_by_name.get(name, ()),
+                producer_attempts=producer_attempts_by_name.get(name, ()),
+            )
+            for name in attack_names
+        },
+        display_groups={
+            name: _count(
+                units_by_display_group.get(name, ()),
+                producer_attempts=producer_attempts_by_display_group.get(name, ()),
+            )
+            for name in display_group_names
+        },
         attempts=len(attempts),
         unattributed_attempts=unattributed_attempts,
     )

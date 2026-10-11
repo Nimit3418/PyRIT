@@ -38,7 +38,12 @@ from pyrit.models import (
     SeedObjective,
     SeedPrompt,
 )
-from pyrit.output.scenario_result.json import JsonScenarioResultPrinter
+from pyrit.output._derivation import scenario_overview
+from pyrit.output.scenario_result.html import HtmlScenarioReportPrinter
+from pyrit.output.scenario_result.json import (
+    JsonScenarioResultPrinter,
+    build_scenario_full_payload,
+)
 from unit.mocks import make_scenario_result
 
 _T0 = datetime(2026, 9, 1, tzinfo=UTC)
@@ -555,6 +560,200 @@ async def test_unmatched_attempts_visible_in_producer_accounting(sqlite_instance
     assert progress.summary.overall.producer_counts == sdk.overall.producer_counts
     assert list_item.producer_counts == sdk.overall.producer_counts
     assert list_item.completed_attacks == 1
+
+    # Per-group breakdown includes unmatched attempts in recognized group and wholly unplanned group
+    attack_atomic = sdk.atomic_attacks["attack"]
+    assert attack_atomic.completed == 1
+    assert attack_atomic.planned == 1
+    assert attack_atomic.producer_counts.target_facing.attempts == 2
+    assert attack_atomic.producer_counts.target_facing.errors == 1
+    assert attack_atomic.producer_counts.unknown.attempts == 1
+    assert attack_atomic.producer_counts.unknown.errors == 1
+    assert attack_atomic.producer_counts.orchestration.attempts == 0
+
+    orch_atomic = sdk.atomic_attacks["orchestrator"]
+    assert orch_atomic.completed == 0
+    assert orch_atomic.planned == 0
+    assert orch_atomic.producer_counts.orchestration.attempts == 1
+    assert orch_atomic.producer_counts.orchestration.errors == 0
+
+    attack_display = sdk.display_groups["attack"]
+    assert attack_display.completed == 1
+    assert attack_display.planned == 1
+    assert attack_display.producer_counts.target_facing.attempts == 2
+    assert attack_display.producer_counts.target_facing.errors == 1
+    assert attack_display.producer_counts.unknown.attempts == 1
+    assert attack_display.producer_counts.unknown.errors == 1
+
+    orch_display = sdk.display_groups["orchestrator"]
+    assert orch_display.completed == 0
+    assert orch_display.planned == 0
+    assert orch_display.producer_counts.orchestration.attempts == 1
+    assert orch_display.producer_counts.orchestration.errors == 0
+
+    # Progress rollups assert group counts directly
+    [progress_atomic] = progress.summary.atomic_groups
+    assert progress_atomic.atomic_attack_name == "attack"
+    assert progress_atomic.completed == 1
+    assert progress_atomic.planned == 1
+    assert progress_atomic.producer_counts.target_facing.attempts == 2
+    assert progress_atomic.producer_counts.target_facing.errors == 1
+    assert progress_atomic.producer_counts.unknown.attempts == 1
+    assert progress_atomic.producer_counts.unknown.errors == 1
+
+    [progress_display] = progress.summary.display_groups
+    assert progress_display.display_group == "attack"
+    assert progress_display.completed == 1
+    assert progress_display.planned == 1
+    assert progress_display.producer_counts.target_facing.attempts == 2
+    assert progress_display.producer_counts.target_facing.errors == 1
+    assert progress_display.producer_counts.unknown.attempts == 1
+    assert progress_display.producer_counts.unknown.errors == 1
+
+    [progress_technique] = progress.summary.techniques
+    assert progress_technique.display_group == "attack"
+    assert progress_technique.completed == 1
+    assert progress_technique.planned == 1
+    assert progress_technique.producer_counts.target_facing.attempts == 2
+    assert progress_technique.producer_counts.target_facing.errors == 1
+    assert progress_technique.producer_counts.unknown.attempts == 1
+    assert progress_technique.producer_counts.unknown.errors == 1
+
+    # Overview and JSON report assert group counts directly
+    overview = scenario_overview(scenario_result)
+    overview_groups = {g.name: g for g in overview.groups}
+    assert overview_groups["attack"].objective_executions == 1
+    assert overview_groups["attack"].attempts == 3
+    assert overview_groups["attack"].producer_counts.target_facing.attempts == 2
+    assert overview_groups["attack"].producer_counts.target_facing.errors == 1
+    assert overview_groups["attack"].producer_counts.unknown.attempts == 1
+    assert overview_groups["attack"].producer_counts.unknown.errors == 1
+
+    assert overview_groups["orchestrator"].objective_executions == 0
+    assert overview_groups["orchestrator"].attempts == 1
+    assert overview_groups["orchestrator"].producer_counts.orchestration.attempts == 1
+    assert overview_groups["orchestrator"].producer_counts.orchestration.errors == 0
+
+    report = json.loads(await JsonScenarioResultPrinter().render_async(scenario_result))
+    report_groups = {g["name"]: g for g in report["groups"]}
+    assert report_groups["attack"]["num_objective_executions"] == 1
+    assert report_groups["attack"]["num_attempts"] == 3
+    assert report_groups["attack"]["producer_counts"]["target_facing"]["attempts"] == 2
+    assert report_groups["attack"]["producer_counts"]["target_facing"]["errors"] == 1
+    assert report_groups["attack"]["producer_counts"]["unknown"]["attempts"] == 1
+    assert report_groups["attack"]["producer_counts"]["unknown"]["errors"] == 1
+
+    assert report_groups["orchestrator"]["num_objective_executions"] == 0
+    assert report_groups["orchestrator"]["num_attempts"] == 1
+    assert report_groups["orchestrator"]["producer_counts"]["orchestration"]["attempts"] == 1
+    assert report_groups["orchestrator"]["producer_counts"]["orchestration"]["errors"] == 0
+
+
+async def test_unmatched_producer_attempts_in_per_group_breakdown(sqlite_instance) -> None:
+    # Regression: 1 planned group named "attack", 2 target-facing results with that same group/configuration:
+    # a planned success and an error whose seed ID is outside the saved plan.
+    plan = _plan(
+        _group(name="attack", eval_hash="eval", seed_ids=["seed_1"]),
+        seeds=[_seed("seed_1", "Objective 1")],
+    )
+    history = _History(
+        plan=plan,
+        attempts=[
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Objective 1",
+                outcome=AttackOutcome.SUCCESS,
+                seed_group_id="seed_1",
+                result_role=AttackResultRole.TARGET_FACING,
+            ),
+            _Attempt(
+                atomic_attack_name="attack",
+                objective="Unmatched Objective 2",
+                outcome=AttackOutcome.ERROR,
+                seed_group_id="unmatched_seed",
+                result_role=AttackResultRole.TARGET_FACING,
+            ),
+        ],
+    )
+    scenario_result_id = await _persist(sqlite_instance, history)
+
+    [scenario_result] = await sqlite_instance.get_scenario_results_async(scenario_result_ids=[scenario_result_id])
+    sdk = compute_scenario_statistics(scenario_result)
+
+    # Overall: 2 attempts, 1 error, 1 completed/planned logical unit
+    assert sdk.overall.completed == 1
+    assert sdk.overall.planned == 1
+    assert sdk.overall.succeeded == 1
+    assert sdk.overall.producer_counts.target_facing.attempts == 2
+    assert sdk.overall.producer_counts.target_facing.errors == 1
+
+    # SDK atomic attacks and display groups assert group counts directly
+    assert "attack" in sdk.atomic_attacks
+    attack_atomic = sdk.atomic_attacks["attack"]
+    assert attack_atomic.completed == 1
+    assert attack_atomic.planned == 1
+    assert attack_atomic.succeeded == 1
+    assert attack_atomic.producer_counts.target_facing.attempts == 2
+    assert attack_atomic.producer_counts.target_facing.errors == 1
+
+    assert "attack" in sdk.display_groups
+    attack_display = sdk.display_groups["attack"]
+    assert attack_display.completed == 1
+    assert attack_display.planned == 1
+    assert attack_display.succeeded == 1
+    assert attack_display.producer_counts.target_facing.attempts == 2
+    assert attack_display.producer_counts.target_facing.errors == 1
+
+    # ScenarioProgressReadModel: atomic, display, and technique rollups assert group counts directly
+    service = ScenarioRunService()
+    progress = await service.get_run_progress_from_storage_async(
+        scenario_result_id=scenario_result_id, since=None, limit=500, active_group_ids=[]
+    )
+    assert progress is not None
+
+    [atomic_group] = progress.summary.atomic_groups
+    assert atomic_group.atomic_attack_name == "attack"
+    assert atomic_group.completed == 1
+    assert atomic_group.planned == 1
+    assert atomic_group.producer_counts.target_facing.attempts == 2
+    assert atomic_group.producer_counts.target_facing.errors == 1
+
+    [display_group] = progress.summary.display_groups
+    assert display_group.display_group == "attack"
+    assert display_group.completed == 1
+    assert display_group.planned == 1
+    assert display_group.producer_counts.target_facing.attempts == 2
+    assert display_group.producer_counts.target_facing.errors == 1
+
+    [technique] = progress.summary.techniques
+    assert technique.display_group == "attack"
+    assert technique.completed == 1
+    assert technique.planned == 1
+    assert technique.producer_counts.target_facing.attempts == 2
+    assert technique.producer_counts.target_facing.errors == 1
+
+    # Report overview and JSON printer assert group counts directly
+    overview = scenario_overview(scenario_result)
+    [group_overview] = overview.groups
+    assert group_overview.name == "attack"
+    assert group_overview.objective_executions == 1
+    assert group_overview.attempts == 2
+    assert group_overview.producer_counts.target_facing.attempts == 2
+    assert group_overview.producer_counts.target_facing.errors == 1
+
+    report = json.loads(await JsonScenarioResultPrinter().render_async(scenario_result))
+    [group_report] = report["groups"]
+    assert group_report["name"] == "attack"
+    assert group_report["num_objective_executions"] == 1
+    assert group_report["num_attempts"] == 2
+    assert group_report["producer_counts"]["target_facing"]["attempts"] == 2
+    assert group_report["producer_counts"]["target_facing"]["errors"] == 1
+
+    # HTML report displays 2 attempts and 2 target-facing attempts without 2-versus-1 mismatch
+    json_overview = JsonScenarioResultPrinter().build(scenario_result, view="overview")
+    payload = build_scenario_full_payload(result=scenario_result, overview=json_overview, entries=[])
+    html = await HtmlScenarioReportPrinter().render_async(payload)
+    assert "<td>attack</td><td>1</td>\n      <td>2</td>\n      <td>2</td>" in html
 
 
 async def test_malformed_roles_fall_back_to_unknown_in_producer_accounting(sqlite_instance) -> None:

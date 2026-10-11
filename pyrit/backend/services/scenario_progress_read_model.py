@@ -384,6 +384,10 @@ class ScenarioProgressReadModel:
             results=latest_results,
         )
 
+        results_by_atomic_group_id: dict[str, list[ScenarioProgressResult]] = {}
+        for result in results:
+            results_by_atomic_group_id.setdefault(result.atomic_group_id, []).append(result)
+
         active_ids = set(active_group_ids)
         atomic_groups: list[ScenarioAtomicGroupProgress] = []
         for group in plan.atomic_groups:
@@ -391,6 +395,7 @@ class ScenarioProgressReadModel:
             counts = aggregate(
                 units=units,
                 planned=len(units) if plan_complete else None,
+                producer_attempts=results_by_atomic_group_id.get(group.id, ()),
             )
             if not terminal and group.id in active_ids:
                 group_status: Literal["RUNNING", "PENDING", "INCOMPLETE", "COMPLETED"] = "RUNNING"
@@ -432,6 +437,7 @@ class ScenarioProgressReadModel:
             counts = aggregate(
                 units=units,
                 planned=len(units) if plan_complete else None,
+                producer_attempts=[r for group in groups for r in results_by_atomic_group_id.get(group.id, ())],
             )
             display_groups.append(
                 ScenarioDisplayGroupProgress(
@@ -450,6 +456,7 @@ class ScenarioProgressReadModel:
             counts = aggregate(
                 units=units,
                 planned=len(units) if plan_complete else None,
+                producer_attempts=[r for group in groups for r in results_by_atomic_group_id.get(group.id, ())],
             )
             descriptions = list(dict.fromkeys(group.description for group in groups if group.description))
             tags = sorted({tag for group in groups for tag in group.tags})
@@ -474,9 +481,11 @@ class ScenarioProgressReadModel:
                 for group in plan.atomic_groups
                 if seed_id in group.seed_group_ids
             ]
+            group_ids = {group.id for group in plan.atomic_groups if seed_id in group.seed_group_ids}
             counts = aggregate(
                 units=units,
                 planned=len(units) if plan_complete else None,
+                producer_attempts=[r for r in results if r.seed_group_id == seed_id and r.atomic_group_id in group_ids],
             )
             seed_groups.append(
                 ScenarioSeedGroupProgress(
