@@ -196,7 +196,8 @@ class ScenarioProgressCounts(BaseModel):
     their historical-attempt meaning and must not be used as outcome denominators.
     None preserves older count-only payloads whose outcome breakdown is unknown.
     Supplied totals must agree with the outcome breakdown; mutable values are
-    revalidated when they are passed back into analytics.
+    revalidated when they are passed back into analytics. ``producer_counts``
+    uses a separate historical population and never changes these logical totals.
     """
 
     model_config = ConfigDict(revalidate_instances="always")
@@ -269,7 +270,7 @@ class ScenarioExecutionStatistics(BaseModel):
     display_groups: dict[str, ScenarioProgressCounts] = Field(default_factory=dict)
     #: Total persisted attempts, including superseded ones.
     attempts: int = Field(default=0, ge=0)
-    #: Attempts that matched no planned execution unit and are excluded from the counts.
+    #: Attempts excluded from logical-unit counts, but retained in producer counts.
     unattributed_attempts: int = Field(default=0, ge=0)
 
 
@@ -343,8 +344,8 @@ class ScenarioProgressSummary(BaseModel):
     techniques: list[ScenarioTechniqueProgress] = Field(default_factory=list)
     seed_groups: list[ScenarioSeedGroupProgress] = Field(default_factory=list)
     atomic_groups: list[ScenarioAtomicGroupProgress] = Field(default_factory=list)
-    #: Persisted attempts that matched no planned execution unit and are therefore absent
-    #: from every rollup above. Non-zero means the rollups understate what actually ran.
+    #: Persisted attempts excluded from logical-unit rollups. Overall producer counts
+    #: still include them; planned-group producer counts require unambiguous group attribution.
     unattributed_attempts: int = Field(default=0, ge=0)
 
 

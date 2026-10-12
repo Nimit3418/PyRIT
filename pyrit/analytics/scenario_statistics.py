@@ -388,8 +388,6 @@ def combine_execution_counts(counts: Iterable[ScenarioProgressCounts]) -> Scenar
     completed = sum(item.completed for item in counts)
     succeeded = sum(item.succeeded for item in counts)
     planned = [item.planned for item in counts]
-    from pyrit.models import ScenarioProducerCategoryCounts, ScenarioProducerCounts
-
     producer_counts = ScenarioProducerCounts(
         target_facing=ScenarioProducerCategoryCounts(
             attempts=sum(item.producer_counts.target_facing.attempts for item in counts),
@@ -437,7 +435,9 @@ def compute_scenario_statistics(
 
     With a run plan, counts cover the planned units, and attempts that match no planned unit are
     reported as unattributed. Without one (legacy results), every resolved unit counts and display
-    groups come from ``display_group_map``.
+    groups come from ``display_group_map``. Producer counts include all saved attempts by recorded
+    atomic attack name, even when a configuration matches no planned unit. Display groups use a
+    resolved planned group when available, otherwise the saved display-group mapping.
 
     Args:
         scenario_result (ScenarioResult): The scenario result with its hydrated attack results.
@@ -495,28 +495,17 @@ def compute_scenario_statistics(
     producer_attempts_by_name: dict[str, list[ScenarioAttempt]] = {}
     producer_attempts_by_display_group: dict[str, list[ScenarioAttempt]] = {}
 
-    if plan is not None:
-        planned_groups_by_id = {group.id: group for group in plan.atomic_groups}
-        for attempt in attempts:
-            planned_group = planned_groups_by_id.get(attempt.unit.atomic_group_id)
-            if planned_group is not None:
-                producer_attempts_by_name.setdefault(planned_group.atomic_attack_name, []).append(attempt)
-                producer_attempts_by_display_group.setdefault(planned_group.display_group, []).append(attempt)
-            else:
-                matching_planned = plan_lookup.groups_by_name.get(attempt.atomic_attack_name, ())
-                if len(matching_planned) == 0:
-                    name = attempt.atomic_attack_name
-                    display_group = scenario_result.display_group_map.get(name, name)
-                    producer_attempts_by_name.setdefault(name, []).append(attempt)
-                    producer_attempts_by_display_group.setdefault(display_group, []).append(attempt)
-                # If len(matching_planned) > 1: genuinely ambiguous attribution between planned groups.
-                # Keep genuinely ambiguous attribution explicitly unmatched rather than guessing.
-    else:
-        for attempt in attempts:
-            name = attempt.atomic_attack_name
-            display_group = scenario_result.display_group_map.get(name, name)
-            producer_attempts_by_name.setdefault(name, []).append(attempt)
-            producer_attempts_by_display_group.setdefault(display_group, []).append(attempt)
+    planned_groups_by_id = {group.id: group for group in plan.atomic_groups} if plan is not None else {}
+    for attempt in attempts:
+        name = attempt.atomic_attack_name
+        planned_group = planned_groups_by_id.get(attempt.unit.atomic_group_id)
+        display_group = (
+            planned_group.display_group
+            if planned_group is not None
+            else scenario_result.display_group_map.get(name, name)
+        )
+        producer_attempts_by_name.setdefault(name, []).append(attempt)
+        producer_attempts_by_display_group.setdefault(display_group, []).append(attempt)
 
     attack_names = list(units_by_name.keys())
     attack_names.extend(name for name in producer_attempts_by_name if name not in units_by_name)

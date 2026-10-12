@@ -63,6 +63,7 @@ class _Attempt:
     attack_result_id: str | None = None
     seconds: int | None = None
     result_role: AttackResultRole | str = AttackResultRole.UNKNOWN
+    total_retries: int = 0
 
 
 @dataclass(frozen=True)
@@ -343,6 +344,7 @@ async def _persist(memory: MemoryInterface, history: _History) -> str:
                 attribution_parent_id=str(scenario_result_id),
                 attribution_data=attribution_data,
                 atomic_attack_identifier=atomic_attack_identifier,
+                total_retries=attempt.total_retries,
             )
         )
     if attack_results:
@@ -754,6 +756,113 @@ async def test_unmatched_producer_attempts_in_per_group_breakdown(sqlite_instanc
     payload = build_scenario_full_payload(result=scenario_result, overview=json_overview, entries=[])
     html = await HtmlScenarioReportPrinter().render_async(payload)
     assert "<td>attack</td><td>1</td>\n      <td>2</td>\n      <td>2</td>" in html
+
+
+@pytest.mark.parametrize("eval_hash", ["unplanned-config", None])
+@pytest.mark.parametrize("multiple_groups", [False, True])
+async def test_same_name_producers_survive_unmatched_configuration(
+    sqlite_instance: MemoryInterface, eval_hash: str | None, multiple_groups: bool
+) -> None:
+    groups = [_group(name="attack", eval_hash="eval", seed_ids=["a"], display_group="planned-one")]
+    if multiple_groups:
+        groups.append(_group(name="attack", eval_hash="second", seed_ids=["a"], display_group="planned-two"))
+    seed_id = "a" if eval_hash else "outside-plan"
+    run_id = await _persist(
+        sqlite_instance,
+        _History(
+            plan=_plan(*groups, seeds=[_seed("a", "Reply OK")]),
+            display_group_map={"attack": "reported"},
+            attempts=[
+                _Attempt(
+                    "attack",
+                    "Reply OK",
+                    AttackOutcome.SUCCESS,
+                    seed_group_id="a",
+                    result_role=AttackResultRole.TARGET_FACING,
+                ),
+                _Attempt(
+                    "attack",
+                    "Reply OK",
+                    AttackOutcome.ERROR,
+                    eval_hash=eval_hash,
+                    seed_group_id=seed_id,
+                    result_role=AttackResultRole.TARGET_FACING,
+                    total_retries=2,
+                ),
+                _Attempt(
+                    "attack",
+                    "Reply OK",
+                    AttackOutcome.FAILURE,
+                    eval_hash=eval_hash,
+                    seed_group_id=seed_id,
+                    result_role=AttackResultRole.ORCHESTRATION,
+                    total_retries=-3,
+                ),
+                _Attempt(
+                    "attack",
+                    "Reply OK",
+                    AttackOutcome.UNDETERMINED,
+                    eval_hash=eval_hash,
+                    seed_group_id=seed_id,
+                    total_retries=1,
+                ),
+            ],
+        ),
+    )
+    [scenario] = await sqlite_instance.get_scenario_results_async(scenario_result_ids=[run_id])
+    statistics = compute_scenario_statistics(scenario)
+    expected = {
+        "target_facing": {"attempts": 2, "errors": 1, "retries": 2},
+        "orchestration": {"attempts": 1, "errors": 0, "retries": 0},
+        "unknown": {"attempts": 1, "errors": 0, "retries": 1},
+    }
+    assert statistics.overall.producer_counts.model_dump() == expected
+    assert statistics.atomic_attacks["attack"].producer_counts.model_dump() == expected
+    assert statistics.overall.completed == statistics.overall.succeeded == 1
+    assert statistics.overall.planned == len(groups)
+    assert statistics.unattributed_attempts == 3
+    group_known = eval_hash is None and not multiple_groups
+    if group_known:
+        assert statistics.display_groups["planned-one"].producer_counts.model_dump() == expected
+    else:
+        assert statistics.display_groups["reported"].producer_counts.model_dump() == {
+            "target_facing": {"attempts": 1, "errors": 1, "retries": 2},
+            "orchestration": {"attempts": 1, "errors": 0, "retries": 0},
+            "unknown": {"attempts": 1, "errors": 0, "retries": 1},
+        }
+
+    report = JsonScenarioResultPrinter().build(scenario)
+    [report_group] = report["groups"]
+    assert report_group["name"] == "reported"
+    assert report_group["num_attempts"] == 4
+    assert report_group["num_objective_executions"] == 1
+    assert report_group["producer_counts"] == expected
+    html = await HtmlScenarioReportPrinter().render_async(
+        build_scenario_full_payload(result=scenario, overview=report, entries=[])
+    )
+    assert "<td>reported</td><td>1</td>\n      <td>4</td>\n      <td>2</td>" in html
+
+    service = ScenarioRunService()
+    try:
+        detail = await service.get_run_from_storage_async(scenario_result_id=run_id, active_error=None)
+        listing = await service.list_runs_async()
+        [history] = [item for item in listing.items if item.scenario_result_id == run_id]
+        progress = await service.get_run_progress_from_storage_async(
+            scenario_result_id=run_id, since=None, limit=500, active_group_ids=[]
+        )
+        assert detail is not None and progress is not None
+        assert detail.producer_counts is not None and history.producer_counts is not None
+        assert detail.producer_counts.model_dump() == history.producer_counts.model_dump() == expected
+        assert progress.summary.overall.producer_counts.model_dump() == expected
+        assert progress.summary.overall.completed == 1
+        assert progress.summary.overall.planned == len(groups)
+        assert progress.summary.unattributed_attempts == 3
+        assert sum(group.producer_counts.target_facing.attempts for group in progress.summary.atomic_groups) == (
+            2 if group_known else 1
+        )
+        assert sum(group.completed for group in progress.summary.atomic_groups) == 1
+    finally:
+        await service.close_async()
 
 
 async def test_malformed_roles_fall_back_to_unknown_in_producer_accounting(sqlite_instance) -> None:

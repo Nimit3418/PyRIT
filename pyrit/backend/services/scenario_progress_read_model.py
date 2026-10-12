@@ -375,7 +375,7 @@ class ScenarioProgressReadModel:
         if unattributed_attempts:
             logger.warning(
                 "%d persisted attempt(s) matched no planned execution unit and are excluded from "
-                "scenario progress rollups.",
+                "logical-unit progress rollups, but retained in overall producer counts.",
                 unattributed_attempts,
             )
         latest_results = [attempts_by_unit[unit][-1] for unit in overall_units if attempts_by_unit.get(unit)]
