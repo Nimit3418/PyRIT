@@ -14,6 +14,9 @@ import TargetConfig from './components/Config/TargetConfig'
 import ConverterRegistry from './components/Registry/ConverterRegistry'
 import TechniqueRegistry from './components/Registry/TechniqueRegistry'
 import RegistryLayout from './components/Registry/RegistryLayout'
+import ScorerRegistry from './components/Registry/ScorerRegistry'
+import { useScorerRegistry } from './hooks/useScorerRegistry'
+import type { RegisteredComponentReference, ManualContinuation } from './types'
 import Configuration from './components/Configuration/Configuration'
 import AttackHistory from './components/History/AttackHistory'
 import AnalyticsPage from './components/Analytics/AnalyticsPage'
@@ -25,6 +28,11 @@ import ScenarioHistory from './components/History/ScenarioHistory'
 import ScenarioCatalog from './components/Scenarios/ScenarioCatalog'
 import ScenarioDetail from './components/Scenarios/ScenarioDetail'
 import ScenarioRunPage from './components/Scenarios/ScenarioRunPage'
+import ScenarioPresetEditor from './components/ScenarioPresets/ScenarioPresetEditor'
+import ScenarioPresetLibrary from './components/ScenarioPresets/ScenarioPresetLibrary'
+import { presetEditorRoutePath } from './components/ScenarioPresets/presetRoutes'
+import ScenarioSuiteEditor from './components/ScenarioSuites/ScenarioSuiteEditor'
+import ScenarioSuiteLibrary from './components/ScenarioSuites/ScenarioSuiteLibrary'
 import DatasetCatalog from './components/Datasets/DatasetCatalog'
 import DatasetSelection from './components/Datasets/DatasetSelection'
 import FeedbackDialog from './components/Feedback/FeedbackDialog'
@@ -60,11 +68,14 @@ import {
 import { attacksApi, authApi, versionApi } from './services/api'
 import { toApiError } from './services/errors'
 import { useTour } from './hooks/useTour'
+import { ChatDraftProvider, useChatDraftHandoff } from './hooks/useChatDraftHandoff'
 import {
   attackConversationRoutePath,
   attackRoutePath,
   DATASET_DETAIL_PATH,
   DATASETS_PATH,
+  isChatPath,
+  isDatasetsPath,
   routerPathParamValue,
   scenarioRunProvenance,
   findingEvidenceOrigin,
@@ -127,6 +138,11 @@ function LegacyScenarioRunRedirect() {
   return <Navigate replace to={scenarioRunRoutePath(routerPathParamValue(scenarioResultId))} />
 }
 
+function LegacyPresetEditorRedirect() {
+  const { presetName } = useParams<{ presetName: string }>()
+  return <Navigate replace to={presetEditorRoutePath(routerPathParamValue(presetName))} />
+}
+
 function LegacyScenarioHistoryRedirect() {
   const location = useLocation()
   return <Navigate replace to={`${HISTORY_SCANNER_PATH}${location.search}`} />
@@ -157,6 +173,10 @@ interface LoadedAttack {
   outcome: NonNullable<AttackSummary['outcome']>
   automatedScore: BackendScore | null
   humanScore: BackendScore | null
+  chatScorer?: RegisteredComponentReference | null
+  chatScorerInherited?: boolean
+  executionReadOnly?: boolean
+  manualContinuation?: ManualContinuation | null
   lastResponseMessagePieceId: string | null
   status: AttackLoadStatus
 }
@@ -198,18 +218,27 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
   const [isNavigatingToCreatedAttack, startCreatedAttackTransition] = useTransition()
   const location = useLocation()
   const registry = useTargetRegistry()
+  const scorerRegistry = useScorerRegistry()
   const { preferences, updatePreferences, error: preferenceError } = useUserPreferences()
   const targetDefaults = useTargetPreferences(registry.targets)
+  const draftHandoff = useChatDraftHandoff()
+  const { clearPreservedDraft, dismissPendingImport } = draftHandoff
   const [draftSession, setDraftSession] = useState<{
     pathname: string
     key: number
     target: TargetReference | null
   }>({ pathname: location.pathname, key: 0, target: targetDefaults.preferences.objective })
   if (draftSession.pathname !== location.pathname) {
+    const isReturningToUnsavedChatWithPreservedDraft =
+      location.pathname === VIEW_PATHS.chat &&
+      draftHandoff.preservedDraft?.originatingAttackId === null
+    const nextTarget = isReturningToUnsavedChatWithPreservedDraft && draftHandoff.preservedDraft?.draft.target !== undefined
+      ? draftHandoff.preservedDraft.draft.target
+      : targetDefaults.preferences.objective
     setDraftSession({
       pathname: location.pathname,
-      key: draftSession.key + (location.pathname === VIEW_PATHS.chat ? 1 : 0),
-      target: targetDefaults.preferences.objective,
+      key: draftSession.key + (location.pathname === VIEW_PATHS.chat && !isReturningToUnsavedChatWithPreservedDraft ? 1 : 0),
+      target: nextTarget,
     })
   }
   const draftTarget = !registry.loading && !registry.error && draftSession.target
@@ -312,6 +341,8 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
   const lastHistorySearch = useRef('')
   const lastScenarioHistorySearch = useRef('')
   const lastAnalyticsLocation = useRef('')
+  const lastDatasetsLocation = useRef<{ path: string; state: unknown }>({ path: '', state: null })
+  const lastChatLocation = useRef<{ path: string; state: unknown }>({ path: '', state: null })
   useEffect(() => {
     if (location.pathname === HISTORY_ATTACKS_PATH) {
       lastHistorySearch.current = location.search
@@ -322,7 +353,23 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
     if (location.pathname === VIEW_PATHS.analytics) {
       lastAnalyticsLocation.current = location.search + location.hash
     }
-  }, [location.pathname, location.search, location.hash])
+    if (isDatasetsPath(location.pathname)) {
+      lastDatasetsLocation.current = {
+        path: location.pathname + location.search + location.hash,
+        state: location.state,
+      }
+    }
+    if (isChatPath(location.pathname)) {
+      lastChatLocation.current = {
+        path: location.pathname + location.search + location.hash,
+        state: location.state,
+      }
+    }
+    if (!isDatasetsPath(location.pathname) && !isChatPath(location.pathname)) {
+      clearPreservedDraft()
+      dismissPendingImport()
+    }
+  }, [location.pathname, location.search, location.hash, location.state, clearPreservedDraft, dismissPendingImport])
 
   const handleFiltersChange = useCallback((filters: HistoryFilters) => {
     // The label search is controlled by this URL state and must not lag behind typing.
@@ -448,6 +495,10 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
           outcome: attack.outcome ?? 'undetermined',
           automatedScore: attack.automated_score ?? null,
           humanScore: attack.human_score ?? null,
+          chatScorer: attack.chat_scorer ?? null,
+          chatScorerInherited: attack.chat_scorer_inherited ?? false,
+          executionReadOnly: attack.execution_read_only ?? false,
+          manualContinuation: attack.manual_continuation ?? null,
           lastResponseMessagePieceId: attack.last_response?.id ?? null,
           status: 'success',
         })
@@ -547,12 +598,40 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
       navigate(VIEW_PATHS.analytics + lastAnalyticsLocation.current)
       return
     }
+    if (view === 'datasets') {
+      if (lastDatasetsLocation.current.path) {
+        navigate(lastDatasetsLocation.current.path, { state: lastDatasetsLocation.current.state })
+      } else {
+        navigate(VIEW_PATHS.datasets)
+      }
+      return
+    }
+    if (view === 'chat') {
+      if (draftHandoff.preservedDraft?.originatingPath) {
+        navigate(draftHandoff.preservedDraft.originatingPath, { state: draftHandoff.preservedDraft.originatingState })
+        return
+      }
+      if (lastChatLocation.current.path) {
+        navigate(lastChatLocation.current.path, { state: lastChatLocation.current.state })
+        return
+      }
+      navigate(VIEW_PATHS.chat)
+      return
+    }
     navigate(VIEW_PATHS[view])
-  }, [navigate])
+  }, [navigate, draftHandoff.preservedDraft])
 
   const handleNewAttack = useCallback(() => {
+    clearPreservedDraft()
+    dismissPendingImport()
+    lastChatLocation.current = { path: VIEW_PATHS.chat, state: null }
+    setDraftSession((current) => ({
+      ...current,
+      key: current.key + 1,
+      target: targetDefaults.preferences.objective,
+    }))
     navigate(VIEW_PATHS.chat)
-  }, [navigate])
+  }, [navigate, clearPreservedDraft, dismissPendingImport, targetDefaults.preferences.objective])
 
   const handleConversationCreated = useCallback((
     arId: string,
@@ -627,6 +706,10 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
             outcome: attack.outcome ?? 'undetermined',
             automatedScore: attack.automated_score ?? null,
             humanScore: attack.human_score ?? null,
+            chatScorer: attack.chat_scorer ?? null,
+            chatScorerInherited: attack.chat_scorer_inherited ?? false,
+            executionReadOnly: attack.execution_read_only ?? false,
+            manualContinuation: attack.manual_continuation ?? null,
             lastResponseMessagePieceId: attack.last_response?.id ?? null,
           }
         : current
@@ -656,7 +739,7 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
       attackId={routeAttackId ?? ''}
       variant={isAttackError ? 'error' : 'not-found'}
       findingEvidenceId={findingEvidenceId}
-      onStartNew={() => navigate(VIEW_PATHS.chat)}
+      onStartNew={handleNewAttack}
       onBackToHistory={() => navigate(VIEW_PATHS.history)}
     />
   ) : (
@@ -665,6 +748,11 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
       toolbarContainer={chatToolbarContainer}
       onNewAttack={handleNewAttack}
       activeTarget={activeTarget}
+      draftTargetReference={routeAttackId === null ? draftSession.target : undefined}
+      draftContext={{
+        originatingAttackId: routeAttackId,
+        originatingConversationId: activeConversationId ?? routeConversationId,
+      }}
       availableTargets={registry.targets}
       targetsLoading={registry.loading}
       targetsError={registry.error}
@@ -699,6 +787,14 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
       outcome={readyAttack?.outcome}
       automatedScore={readyAttack?.automatedScore}
       humanScore={readyAttack?.humanScore}
+      chatScorer={readyAttack?.chatScorer}
+      chatScorerInherited={readyAttack?.chatScorerInherited}
+      executionReadOnly={readyAttack?.executionReadOnly}
+      manualContinuation={readyAttack?.manualContinuation}
+      defaultChatScorer={preferences.chatScorer ?? null}
+      availableScorers={scorerRegistry.scorers}
+      scorersLoading={scorerRegistry.loading}
+      scorersError={scorerRegistry.error}
       lastResponseMessagePieceId={readyAttack?.lastResponseMessagePieceId}
       scenarioResultId={readyAttack ? scenarioResultId : null}
       findingEvidenceId={findingEvidenceId}
@@ -814,12 +910,35 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
                   }
                 />
                 <Route path="converters" element={<ConverterRegistry />} />
+                <Route path="scorers" element={<ScorerRegistry scorers={scorerRegistry.scorers}
+                  loading={scorerRegistry.loading} error={scorerRegistry.error} onRefresh={scorerRegistry.refresh} />} />
                 <Route path="techniques" element={<TechniqueRegistry />} />
+                <Route
+                  path="scenario-presets"
+                  element={
+                    <ScenarioPresetLibrary
+                      targets={registry.targets}
+                      defaultObjectiveTarget={targetDefaults.objectiveTarget}
+                      defaultAdversarialTarget={targetDefaults.adversarialTarget}
+                      labels={globalLabels}
+                      operationId={operationId}
+                      defaultsReady={newActivityReady}
+                    />
+                  }
+                />
+                <Route path="scenario-presets/new" element={<ScenarioPresetEditor mode="create" />} />
+                <Route path="scenario-presets/:presetName/edit" element={<ScenarioPresetEditor mode="edit" />} />
+                <Route path="scenario-suites" element={<ScenarioSuiteLibrary />} />
+                <Route path="scenario-suites/new" element={<ScenarioSuiteEditor mode="create" />} />
+                <Route path="scenario-suites/:suiteName/edit" element={<ScenarioSuiteEditor mode="edit" />} />
               </Route>
               <Route path="/targets" element={<Navigate to="/registry/targets" replace />} />
               <Route path="/scanner" element={<ScenarioCatalog />} />
               <Route path={DATASETS_PATH} element={<DatasetCatalog />} />
               <Route path={DATASET_DETAIL_PATH} element={<DatasetSelection />} />
+              <Route path="/scanner/presets" element={<Navigate to="/registry/scenario-presets" replace />} />
+              <Route path="/scanner/presets/new" element={<Navigate to="/registry/scenario-presets/new" replace />} />
+              <Route path="/scanner/presets/:presetName/edit" element={<LegacyPresetEditorRedirect />} />
               <Route
                 path="/scanner/:scenarioName"
                 element={
@@ -850,7 +969,7 @@ function AppContent({ operatorAlias }: { operatorAlias: string | null }) {
               <Route path="/analytics" element={<AnalyticsPage onOpenAttack={handleOpenAttack} />} />
               <Route path="/history" element={<LegacyAttackHistoryRedirect />} />
               <Route path="/operations" element={<OperationsPage />} />
-              <Route path="/operations/:operationId" element={<OperationDetailPage />} />
+              <Route path="/operations/:operationId" element={<OperationDetailPage onOperationChanged={operation.retry} />} />
               <Route path="/findings" element={<Navigate to="/operations" replace />} />
               <Route
                 path={HISTORY_ATTACKS_PATH}
@@ -913,7 +1032,9 @@ function App() {
       <RuntimeBanner />
       <UserPreferencesProvider key={accountKey ?? 'account-loading'} accountKey={accountKey}>
         <ThemeProvider>
-          <AppContent operatorAlias={operatorAlias} />
+          <ChatDraftProvider>
+            <AppContent operatorAlias={operatorAlias} />
+          </ChatDraftProvider>
         </ThemeProvider>
       </UserPreferencesProvider>
     </RuntimeProvider>

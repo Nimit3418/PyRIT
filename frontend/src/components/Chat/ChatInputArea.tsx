@@ -118,6 +118,7 @@ interface ChatInputAreaProps {
   disabled?: boolean
   disabledReasons?: string[]
   sendDisabled?: boolean
+  sendDisabledReasons?: string[]
   activeTarget?: TargetInstance | null
   singleTurnLimitReached?: boolean
   onNewConversation?: () => void
@@ -146,10 +147,13 @@ interface ChatInputAreaProps {
   supportsSystemPrompt?: boolean
   systemPrompt?: string
   onSystemPromptChange?: (value: string) => void
+  initialText?: string
+  initialAttachments?: MessageAttachment[]
+  initialTextMetadata?: Record<string, unknown>
 }
 
 const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({
-  onSend, conversionRevisionKey = '', disabled = false, disabledReasons = [], sendDisabled = false, activeTarget,
+  onSend, conversionRevisionKey = '', disabled = false, disabledReasons = [], sendDisabled = false, sendDisabledReasons = [], activeTarget,
   singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false,
   targetResolutionStatus = 'idle', onRetryTargetResolution, onUseAsTemplate, attackOperator, onConfigureTarget,
   onToggleConverterPanel, isConverterPanelOpen = false, onInputChange, onAttachmentsChange,
@@ -157,10 +161,11 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   converterOutputDataTypes = [], mediaConversions = [], onClearMediaConversion, convertedFileChip,
   onClearConvertedFileChip, showSystemPrompt = false, supportsSystemPrompt = false, systemPrompt = '', onSystemPromptChange,
   repeatDisabledReason, undoLastSend,
+  initialText = '', initialAttachments = [], initialTextMetadata,
 }, ref) {
   const styles = usePromptEditorStyles()
-  const [input, setInput] = useState('')
-  const [attachments, setAttachments] = useState<MessageAttachment[]>([])
+  const [input, setInput] = useState(initialText)
+  const [attachments, setAttachments] = useState<MessageAttachment[]>(initialAttachments)
   const [isInputWarningOpen, setIsInputWarningOpen] = useState(false)
   const warningHoverTimer = useRef<number | undefined>(undefined)
   const cancelWarningHover = useCallback((): void => {
@@ -174,7 +179,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   const disabledOverlayRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef(input)
   const attachmentsRef = useRef(attachments)
-  const textMetadataRef = useRef<Record<string, unknown> | undefined>(undefined)
+  const textMetadataRef = useRef<Record<string, unknown> | undefined>(initialTextMetadata)
   const draftRevisionRef = useRef(0)
   const previousConversionRevisionKeyRef = useRef(conversionRevisionKey)
   const inputDisabledReasons = [...disabledReasons]
@@ -198,8 +203,9 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     setInput(text)
   }
   const changeAttachments = (next: MessageAttachment[]): void => {
+    const nextUrls = new Set(next.map((attachment) => attachment.url))
     for (const attachment of attachmentsRef.current) {
-      if (!next.includes(attachment) && attachment.url.startsWith('blob:')) URL.revokeObjectURL(attachment.url)
+      if (!nextUrls.has(attachment.url) && attachment.url.startsWith('blob:')) URL.revokeObjectURL(attachment.url)
     }
     attachmentsRef.current = next
     draftRevisionRef.current += 1
@@ -216,7 +222,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     restoreDraft: (text: string, draftAttachments: MessageAttachment[], textMetadata?: Record<string, unknown>): void => {
       changeText(text)
       textMetadataRef.current = textMetadata
-      changeAttachments(draftAttachments.map(withDraftIdentity))
+      changeAttachments(draftAttachments.map((attachment) => attachment.draftId ? attachment : withDraftIdentity(attachment)))
     },
     focus: (): void => { textareaRef.current?.focus() },
     getDraftRevision: (): number => draftRevisionRef.current,
@@ -231,9 +237,23 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   const unsupportedConverterOutputTypes = getUnsupportedConverterOutputTypes(
     [...converterOutputDataTypes, ...mediaConversions.map((conversion) => conversion.convertedDataType)], activeTarget,
   )
-  const hasUnsupportedModalities = unsupportedAttachmentTypes.length > 0 || unsupportedConverterOutputTypes.length > 0
-  const canSend = !disabled && !sendDisabled && !hasUnsupportedModalities
-    && Boolean(input || convertedValue != null || convertedFileChip || attachments.length)
+  const unsupportedModalityReasons = [
+    ...(unsupportedAttachmentTypes.length > 0
+      ? [`This target does not support ${unsupportedAttachmentTypes.join(', ')} attachments. Remove them to send.`] : []),
+    ...(unsupportedConverterOutputTypes.length > 0
+      ? [`The selected converter produces ${unsupportedConverterOutputTypes.map((type: string) => type.replace('_path', '')).join(', ')} output, which this target does not support.`] : []),
+  ]
+  const hasUnsupportedModalities = unsupportedModalityReasons.length > 0
+  const hasContent = Boolean(input || convertedValue != null || convertedFileChip || attachments.length)
+  const sendBlockedReasons = [
+    ...(disabled ? inputDisabledReasons : []),
+    ...(sendDisabled ? sendDisabledReasons.length > 0
+      ? sendDisabledReasons : ['Sending is temporarily unavailable. Wait for the current operation to finish.'] : []),
+    ...unsupportedModalityReasons,
+    ...(!hasContent ? ['Enter a prompt or attach a file.'] : []),
+  ]
+  const canSend = sendBlockedReasons.length === 0
+  const sendTooltip = canSend ? 'Send message' : `Send message: ${sendBlockedReasons.join(' ')}`
   const handleSend = async (): Promise<void> => {
     if (!canSend) return
     const submittedRevision = draftRevisionRef.current
@@ -296,10 +316,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
               onChange={onSystemPromptChange} disabled={!!activeTarget && !supportsSystemPrompt} />}
             warning={hasUnsupportedModalities && <div className={styles.unsupportedWarning} data-testid="unsupported-modality-warning">
               <WarningRegular fontSize={14} /><Caption1>
-                {unsupportedAttachmentTypes.length > 0 && <>This target does not support {unsupportedAttachmentTypes.join(', ')} attachments. Remove them to send.</>}
-                {unsupportedAttachmentTypes.length > 0 && unsupportedConverterOutputTypes.length > 0 && ' '}
-                {unsupportedConverterOutputTypes.length > 0 && <>The selected converter produces{' '}
-                  {unsupportedConverterOutputTypes.map((type: string) => type.replace('_path', '')).join(', ')} output, which this target does not support.</>}
+                {unsupportedModalityReasons.join(' ')}
               </Caption1>
             </div>}
             actions={<>
@@ -309,9 +326,9 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 content="This target does not track conversation history — each turn is sent independently." relationship="description">
                 <span className={styles.singleTurnWarning}><InfoRegular fontSize={18} /></span>
               </Tooltip>}
-              <Tooltip content="Send message" relationship="label">
+              <Tooltip content={sendTooltip} relationship="description">
                 <Button className={styles.sendButton} appearance="primary" icon={<SendRegular />}
-                  onClick={() => { void handleSend() }} disabled={!canSend} aria-label="Send message" data-testid="send-message-btn" />
+                  onClick={() => { void handleSend() }} disabledFocusable={!canSend} aria-label="Send message" data-testid="send-message-btn" />
               </Tooltip>
               {convertedValue != null && <Tooltip content="Clear conversion" relationship="label">
                 <Button appearance="subtle" className={styles.clearConversionButton} icon={<DismissRegular />}
@@ -339,7 +356,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 onMouseLeave={cancelWarningHover}
                 aria-label="Why the prompt box is disabled" />
             </PopoverTrigger>
-            <PopoverSurface className={styles.disabledReasonsPopover}>
+            <PopoverSurface className={styles.disabledReasonsPopover} aria-label="Prompt input is disabled">
               <div className={styles.disabledReasonsHeader}>
                 <InfoRegular fontSize={16} />
                 <Text size={200} weight="semibold">Prompt input is disabled</Text>
