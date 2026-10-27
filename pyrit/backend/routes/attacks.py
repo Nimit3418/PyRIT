@@ -391,7 +391,7 @@ async def get_conversation_messages(  # pyrit-async-suffix-exempt
     cursor: CursorStr | None = Query(None, description="Opaque message-piece continuation cursor"),
 ) -> ConversationMessagesResponse:
     """
-    Get saved messages for a conversation belonging to an attack.
+    Get saved messages for a main or pruned conversation belonging to an attack.
 
     Omitting limit preserves the existing full-conversation response. Paged reads can
     split a multimodal turn; append pieces by their IDs and turn number across pages.
@@ -437,11 +437,11 @@ async def get_conversations(  # pyrit-async-suffix-exempt
     cursor: CursorStr | None = Query(None, description="Opaque conversation-reference continuation cursor"),
 ) -> AttackConversationsResponse:
     """
-    Get saved conversations belonging to an attack.
+    Get main and pruned conversations belonging to an attack.
 
     Without a limit, preserve the existing active-conversation list and timestamp
-    ordering. Paged reads include main, pruned, adversarial, and preparation contexts
-    in stored-reference order, with message counts and preview text.
+    ordering. Paged reads use stored-reference order, with message counts and
+    preview text. Both paths exclude adversarial and preparation contexts.
 
     Returns:
         AttackConversationsResponse: All conversations for the attack.

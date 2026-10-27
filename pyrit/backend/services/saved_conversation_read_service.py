@@ -29,7 +29,7 @@ class SavedConversationReadService:
         self, *, attack_result_id: str, limit: int = 50, cursor: str | None = None
     ) -> AttackConversationsResponse | None:
         """
-        Page saved main/related conversations without loading their message bodies.
+        Page saved main and pruned conversations without loading their message bodies.
 
         Returns:
             AttackConversationsResponse | None: A reference page, or None for an absent attack.
@@ -112,7 +112,7 @@ class SavedConversationReadService:
         self, *, attack_result_id: str, conversation_id: str, limit: int = 100, cursor: str | None = None
     ) -> ConversationMessagesResponse | None:
         """
-        Page canonical messages for one explicitly selected saved conversation.
+        Page canonical messages for one selected main or pruned conversation.
 
         Returns:
             ConversationMessagesResponse | None: A piece-bounded page, or None for an absent attack.

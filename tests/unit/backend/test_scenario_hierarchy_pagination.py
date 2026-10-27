@@ -18,7 +18,15 @@ from pyrit.backend.services.attack_service import AttackService
 from pyrit.backend.services.message_send_service import MessageSendService
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.memory import SQLiteMemory, set_message_piece_sha256_async
-from pyrit.models import AttackOutcome, AttackResult, AttackResultRole, MessagePiece, ScenarioHierarchyNode
+from pyrit.models import (
+    AttackOutcome,
+    AttackResult,
+    AttackResultRole,
+    ConversationReference,
+    ConversationType,
+    MessagePiece,
+    ScenarioHierarchyNode,
+)
 from unit.mocks import get_mock_target_identifier, make_scenario_result
 
 
@@ -335,6 +343,14 @@ async def test_api_journey_loads_only_the_selected_saved_conversation_async(
 ) -> None:
     run_id = await _store_run_async(sqlite_instance)
     child = _result(run_id=run_id, index=1)
+    related = {
+        kind: str(uuid.uuid4())
+        for kind in (ConversationType.PRUNED, ConversationType.ADVERSARIAL, ConversationType.PREPARATION)
+    }
+    child.related_conversations = {
+        ConversationReference(conversation_id=identifier, conversation_type=kind)
+        for kind, identifier in related.items()
+    }
     parent = _result(run_id=run_id, index=0, child_ids=[child.attack_result_id])
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[parent, child])
     pieces = [
@@ -346,9 +362,13 @@ async def test_api_journey_loads_only_the_selected_saved_conversation_async(
         )
         for index in range(3)
     ]
-    for piece in pieces:
+    context_pieces = [
+        MessagePiece(conversation_id=identifier, original_value=f"Saved {kind.value}", role="user", sequence=0)
+        for kind, identifier in related.items()
+    ]
+    for piece in pieces + context_pieces:
         await set_message_piece_sha256_async(piece)
-    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces)
+    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces + context_pieces)
     scenario_service = ScenarioRunService(memory=sqlite_instance)
     sends = MagicMock(spec=MessageSendService)
     attack_service = AttackService(memory=sqlite_instance, message_send_service=sends)
@@ -363,11 +383,38 @@ async def test_api_journey_loads_only_the_selected_saved_conversation_async(
         node = client.get(f"/api/scenarios/runs/{run_id}/hierarchy/nodes/{child.attack_result_id}")
         assert node.status_code == 200
         assert "messages" not in node.json()["conversations"][0]
-        references = client.get(f"/api/attacks/{child.attack_result_id}/conversations", params={"limit": 1})
+        assert node.json()["conversations_count"] == 2
+        assert node.json()["conversations_truncated"] is False
+        conversations_url = f"/api/attacks/{child.attack_result_id}/conversations"
+        unpaged = client.get(conversations_url)
+        assert unpaged.status_code == 200
+        assert {conversation["conversation_id"] for conversation in unpaged.json()["conversations"]} == {
+            child.conversation_id,
+            related[ConversationType.PRUNED],
+        }
+        references = client.get(conversations_url, params={"limit": 1})
         assert references.status_code == 200
-        assert references.json()["conversations"][0]["message_count"] == 1
-        assert node.json()["conversations"] == references.json()["conversations"]
+        reference_body = references.json()
+        assert reference_body["conversations"][0]["message_count"] == 1
+        assert reference_body["total_count"] == 2
+        remaining = client.get(
+            conversations_url, params={"limit": 1, "cursor": reference_body["pagination"]["next_cursor"]}
+        )
+        assert remaining.status_code == 200
+        assert remaining.json()["pagination"]["has_more"] is False
+        assert node.json()["conversations"] == reference_body["conversations"] + remaining.json()["conversations"]
         messages_url = f"/api/attacks/{child.attack_result_id}/messages"
+        for limit in (None, 2):
+            for kind, identifier in related.items():
+                params: dict[str, str | int] = {"conversation_id": identifier}
+                if limit is not None:
+                    params["limit"] = limit
+                response = client.get(messages_url, params=params)
+                if kind == ConversationType.PRUNED:
+                    assert response.status_code == 200
+                    assert response.json()["messages"][0]["message_pieces"][0]["original_value"] == "Saved pruned"
+                else:
+                    assert response.status_code == 400
         first = client.get(messages_url, params={"conversation_id": child.conversation_id, "limit": 2})
         assert first.status_code == 200
         first_body = first.json()

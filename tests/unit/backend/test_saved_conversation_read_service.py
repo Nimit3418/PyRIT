@@ -48,7 +48,7 @@ async def saved_pieces(sqlite_instance: SQLiteMemory, saved_attack: AttackResult
     return pieces
 
 
-async def test_reference_pages_include_every_saved_context_without_message_hydration_async(
+async def test_reference_pages_include_only_main_and_pruned_without_message_hydration_async(
     sqlite_instance: SQLiteMemory, saved_attack: AttackResult, saved_pieces: list[MessagePiece]
 ) -> None:
     reader = SavedConversationReadService(memory=sqlite_instance)
@@ -57,14 +57,14 @@ async def test_reference_pages_include_every_saved_context_without_message_hydra
         patch.object(sqlite_instance, "get_conversation_messages_async", new_callable=AsyncMock) as full_messages,
         patch.object(PromptMemoryEntry, "get_message_piece", autospec=True) as hydrate,
     ):
-        first = await reader.list_conversations_async(attack_result_id=saved_attack.attack_result_id, limit=2)
+        first = await reader.list_conversations_async(attack_result_id=saved_attack.attack_result_id, limit=1)
         assert first is not None
-        assert first.total_count == 4
+        assert first.total_count == 2
         assert first.pagination is not None
         assert first.pagination.has_more
         assert first.pagination.next_cursor is not None
         second = await reader.list_conversations_async(
-            attack_result_id=saved_attack.attack_result_id, limit=2, cursor=first.pagination.next_cursor
+            attack_result_id=saved_attack.attack_result_id, limit=1, cursor=first.pagination.next_cursor
         )
         assert second is not None
         assert second.pagination is not None
@@ -76,16 +76,13 @@ async def test_reference_pages_include_every_saved_context_without_message_hydra
     references = first.conversations + second.conversations
     assert [reference.conversation_id for reference in references] == [
         saved_attack.conversation_id,
-        *(
-            next(
-                reference.conversation_id
-                for reference in saved_attack.related_conversations
-                if reference.conversation_type == kind
-            )
-            for kind in (ConversationType.PRUNED, ConversationType.ADVERSARIAL, ConversationType.PREPARATION)
+        next(
+            reference.conversation_id
+            for reference in saved_attack.related_conversations
+            if reference.conversation_type == ConversationType.PRUNED
         ),
     ]
-    assert [reference.conversation_type for reference in references] == ["main", "pruned", "adversarial", "preparation"]
+    assert [reference.conversation_type for reference in references] == ["main", "pruned"]
     assert references[0].message_count == 2
     assert references[1].message_count == 0
 
@@ -163,7 +160,11 @@ async def test_saved_cursors_reject_other_owners_and_changed_reference_order_asy
     with pytest.raises(ValueError, match="cursor"):
         await reader.get_messages_async(
             attack_result_id=saved_attack.attack_result_id,
-            conversation_id=next(iter(saved_attack.related_conversations)).conversation_id,
+            conversation_id=next(
+                reference.conversation_id
+                for reference in saved_attack.related_conversations
+                if reference.conversation_type == ConversationType.PRUNED
+            ),
             limit=1,
             cursor=message_page.pagination.next_cursor,
         )

@@ -1247,15 +1247,18 @@ async def test_sqlite_conversation_list_clipping_explicit(sqlite_instance: SQLit
     ar_uuid = uuid.uuid4()
     ar_id = str(ar_uuid)
     main_conv_id = str(uuid.uuid4())
-    # 54 preparation conversations + 1 main conversation = 55 total conversations
-    prep_conv_ids = [str(uuid.uuid4()) for _ in range(54)]
+    pruned_conv_ids = [str(uuid.uuid4()) for _ in range(54)]
 
     ar = AttackResult(
         attack_result_id=ar_id,
         conversation_id=main_conv_id,
         related_conversations={
-            ConversationReference(conversation_id=cid, conversation_type=ConversationType.PREPARATION)
-            for cid in prep_conv_ids
+            ConversationReference(conversation_id=cid, conversation_type=ConversationType.PRUNED)
+            for cid in pruned_conv_ids
+        }
+        | {
+            ConversationReference(conversation_id=str(uuid.uuid4()), conversation_type=kind)
+            for kind in (ConversationType.ADVERSARIAL, ConversationType.PREPARATION)
         },
         objective="Conversation clipping test",
         outcome=AttackOutcome.SUCCESS,
@@ -1280,7 +1283,7 @@ async def test_sqlite_conversation_list_clipping_explicit(sqlite_instance: SQLit
     assert len(remaining.conversations) == 5
     assert {conversation.conversation_id for conversation in conv_result.conversations + remaining.conversations} == {
         main_conv_id,
-        *prep_conv_ids,
+        *pruned_conv_ids,
     }
 
     # 2. Service single-node read projects exact count and truncation flag on node
@@ -1443,14 +1446,14 @@ async def test_unloaded_conversations_in_full_hierarchy(sqlite_instance: SQLiteM
     ar_uuid = uuid.uuid4()
     ar_id = str(ar_uuid)
     main_conv_id = str(uuid.uuid4())
-    prep_conv_ids = [str(uuid.uuid4()) for _ in range(55)]
+    pruned_conv_ids = [str(uuid.uuid4()) for _ in range(55)]
 
     ar = AttackResult(
         attack_result_id=ar_id,
         conversation_id=main_conv_id,
         related_conversations={
-            ConversationReference(conversation_id=cid, conversation_type=ConversationType.PREPARATION)
-            for cid in prep_conv_ids
+            ConversationReference(conversation_id=cid, conversation_type=ConversationType.PRUNED)
+            for cid in pruned_conv_ids
         },
         objective="Unloaded conversations test",
         outcome=AttackOutcome.SUCCESS,

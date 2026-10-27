@@ -651,6 +651,8 @@ paged roots and ordered child expansion, with exact run statistics independent o
 the displayed page. Tree previews defer conversation reads. Node expansion uses the
 same conversation metadata as the generic attack API; clients load transcript bodies
 only through the selected saved conversation's paginated message endpoint.
+Only main and pruned conversations are shown; adversarial and preparation contexts
+remain internal.
 See the [backend hierarchy API](../../pyrit/backend/README.md#scenario-result-hierarchy)
 for continuation and clipping semantics.
 

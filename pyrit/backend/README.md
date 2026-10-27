@@ -49,8 +49,8 @@ Saving from the scanner creates a copy through `POST /api/attacks/save-conversat
 it does not change the source or send to a target.
 
 For on-demand saved-result browsing, use
-`GET /api/attacks/{attack_result_id}/conversations?limit=50` to page main, pruned,
-adversarial, and preparation references in saved-reference order. This reads counts
+`GET /api/attacks/{attack_result_id}/conversations?limit=50` to page main and pruned
+references in saved-reference order. This reads counts
 and previews, not conversation bodies. The limit is 1-200; follow
 `pagination.next_cursor` while `pagination.has_more` is true.
 
@@ -68,6 +68,9 @@ validate the saved ordering and timestamp; restart reference paging if the saved
 attack changes. Invalid or mismatched cursors return 400. Passing a cursor requires
 a limit. Omitting both preserves the existing active-conversation listing and
 full-transcript behavior.
+Both paged and unpaged reads expose only main and pruned conversations.
+Adversarial and preparation contexts are excluded from lists, reference totals,
+and transcript reads, including hierarchy node expansion.
 
 ### Scenario result hierarchy
 
@@ -100,7 +103,7 @@ restart child paging after those references change.
 Tree previews leave conversation metadata deferred: `conversations` is empty,
 `conversations_count` is unknown, and `conversations_truncated` is true when saved
 references exist. The node's `conversation_id` still links to its main conversation.
-Node expansion returns up to 50 canonical conversation summaries, the exact reference
+Node expansion returns up to 50 main/pruned conversation summaries, the exact reference
 count, and a clipping flag. These use the same metadata model as the generic attack API.
 Use the saved-conversation APIs above for reference continuation and all transcript
 bodies. There is no hierarchy-specific transcript format or conversation-preview mode.

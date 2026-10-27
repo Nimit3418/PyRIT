@@ -392,7 +392,7 @@ class AttackService:
         cursor: str | None = None,
     ) -> ConversationMessagesResponse | None:
         """
-        Get all messages for a conversation belonging to an attack.
+        Get messages for a main or pruned conversation belonging to an attack.
 
         Args:
             attack_result_id: The AttackResult's primary key (used to verify existence).
@@ -1097,10 +1097,9 @@ class AttackService:
         self, *, attack_result_id: str, limit: int | None = None, cursor: str | None = None
     ) -> AttackConversationsResponse | None:
         """
-        Get all conversations belonging to an attack.
+        Get main and pruned conversations belonging to an attack.
 
-        Includes the main conversation and all related conversations from the
-        AttackResult. Each entry is enriched with message count, a preview,
+        Each entry is enriched with message count, a preview,
         and the earliest message timestamp using a single batched query.
 
         Returns:

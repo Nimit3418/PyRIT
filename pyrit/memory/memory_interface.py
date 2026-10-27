@@ -8173,7 +8173,7 @@ class MemoryInterface(abc.ABC):
         self, *, attack_result_id: str, offset: int = 0, limit: int = 50, conversation_id: str | None = None
     ) -> AttackConversationPage | None:
         """
-        Read stored conversation references without loading attack relationships or message bodies.
+        Read main and pruned references without loading attack relationships or message bodies.
 
         Returns:
             AttackConversationPage | None: One bounded reference page, or None for an absent attack.
@@ -8186,8 +8186,6 @@ class MemoryInterface(abc.ABC):
         statement = select(
             AttackResultEntry.conversation_id,
             AttackResultEntry.pruned_conversation_ids,
-            AttackResultEntry.adversarial_chat_conversation_ids,
-            AttackResultEntry.preparation_conversation_ids,
             AttackResultEntry.timestamp,
             func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id).label(
                 "objective_score_id"
@@ -8201,18 +8199,13 @@ class MemoryInterface(abc.ABC):
         main_id = row["conversation_id"] or ""
         if main_id:
             references[main_id] = AttackConversationRecord(conversation_id=main_id)
-        for column_name, kind in (
-            ("pruned_conversation_ids", ConversationType.PRUNED),
-            ("adversarial_chat_conversation_ids", ConversationType.ADVERSARIAL),
-            ("preparation_conversation_ids", ConversationType.PREPARATION),
-        ):
-            values = row[column_name]
-            if not isinstance(values, list):
-                continue
+        values = row["pruned_conversation_ids"]
+        if isinstance(values, list):
             for identifier in values:
                 if isinstance(identifier, str) and identifier:
                     references.setdefault(
-                        identifier, AttackConversationRecord(conversation_id=identifier, conversation_type=kind)
+                        identifier,
+                        AttackConversationRecord(conversation_id=identifier, conversation_type=ConversationType.PRUNED),
                     )
         ordered = tuple(references.values())
         revision = hashlib.sha256(
@@ -11818,7 +11811,7 @@ class MemoryInterface(abc.ABC):
         conversation_id: str | None = None,
     ) -> AttackConversationPage | None:
         """
-        Read one bounded page of stored main/related conversation references.
+        Read one bounded page of stored main and pruned conversation references.
 
         Returns:
             AttackConversationPage | None: Saved references and ordering revision, or an absent attack.
