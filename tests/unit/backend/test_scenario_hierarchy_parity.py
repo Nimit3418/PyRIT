@@ -1052,8 +1052,9 @@ def test_hierarchy_diagnostics_cap_retries_per_item() -> None:
     assert item.retries_truncated is True
 
 
-@pytest.mark.asyncio
-async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance: SQLiteMemory, tmp_path: Path) -> None:
+async def test_sqlite_bounded_multimodal_conversation_projection_async(
+    *, sqlite_instance: SQLiteMemory, tmp_path: Path
+) -> None:
     """Test multimodal piece projection, raw role preservation, and database-level SQL LIMIT bounding."""
     scenario_uuid = uuid.uuid4()
     scenario_id = str(scenario_uuid)
@@ -1069,6 +1070,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
     ar_uuid = uuid.uuid4()
     ar_id = str(ar_uuid)
     conv_id = str(uuid.uuid4())
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     ar = AttackResult(
         attack_result_id=ar_id,
         conversation_id=conv_id,
@@ -1093,6 +1095,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         original_value="Analyze blueprint image",
         converted_value="Analyze blueprint image",
         sequence=0,
+        timestamp=timestamp,
     )
     p0_img = MessagePiece(
         id=uuid.uuid4(),
@@ -1102,6 +1105,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         original_value=img_path,
         converted_value=img_path,
         sequence=0,
+        timestamp=timestamp + timedelta(microseconds=1),
     )
     # Sequence 1: simulated_assistant role
     p1 = MessagePiece(
@@ -1112,6 +1116,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         original_value="I detect architectural blueprints.",
         converted_value="I detect architectural blueprints.",
         sequence=1,
+        timestamp=timestamp + timedelta(seconds=1),
     )
     # Sequence 2: 3rd message
     p2 = MessagePiece(
@@ -1122,6 +1127,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         original_value="Proceed with analysis.",
         converted_value="Proceed with analysis.",
         sequence=2,
+        timestamp=timestamp + timedelta(seconds=2),
     )
 
     for p in [p0_text, p0_img, p1, p2]:
